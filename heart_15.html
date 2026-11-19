@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>I Love You</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #08060a; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hint {
+    position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%); padding: 8px 16px; border-radius: 999px;
+    background: rgba(255, 255, 255, .08); color: #f3c9cf;
+    font: 14px/1.2 system-ui, sans-serif; transition: opacity .8s; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">Ketuk layar untuk memutar lagu</div>
+<audio id="music" src="lagu.mp3" loop preload="auto"></audio>
+
+<script>
+(() => {
+  // ---------------- Konfigurasi ----------------
+  const CFG = {
+    nFloating: 1000,
+    outlineGap: 22,
+    fillGap: 30,
+    framesPerStep: 0.5,
+    fillDelayOffset: 10,
+    centerDelay: 40,
+    fadeSpeedMin: 25,
+    fadeSpeedRand: 10,
+    yOffset: -10,
+    musicVolume: 0.7,
+    heartWords: ["i love you", "I LOVE YOU", "love you"],
+    centerText: "I Love you",
+    centerColor: "#ffffff",
+    centerFont: "Georgia, 'Times New Roman', serif",
+    floatWords: ["love", "\u2665", "love you", "\u2661"],
+    colors: [[255,0,0],[220,20,60],[255,60,60],[178,34,34],[220,60,60],[255,0,0]],
+    bg: "#08060a"
+  };
+
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const music = document.getElementById("music");
+  const hint = document.getElementById("hint");
+
+  let W, H, DPR, CX, CY, S, K;
+  let outline, fill, floaters, frame, centerAlpha, doneFrame;
+
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+
+  // ---------------- Rumus hati ----------------
+  const heart = t => [
+    16 * Math.sin(t) ** 3,
+    13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)
+  ];
+  const POLY = Array.from({ length: 720 }, (_, i) => heart(Math.PI * 2 * i / 720));
+
+  function insideHeart(hx, hy) {
+    let inside = false;
+    for (let i = 0, j = POLY.length - 1; i < POLY.length; j = i++) {
+      const [xi, yi] = POLY[i], [xj, yj] = POLY[j];
+      if ((yi > hy) !== (yj > hy) && hx < (xj - xi) * (hy - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+
+  // ---------------- Partikel ----------------
+  function heartParticle(x, y, order, kind) {
+    return {
+      x, y, order, kind,
+      word: pick(CFG.heartWords), color: pick(CFG.colors),
+      alpha: 0, flicker: rnd(0, Math.PI * 2), delay: 0, sizeMult: rnd(0.85, 1.15)
+    };
+  }
+
+  function floating(initial) {
+    const f = {};
+    resetFloating(f, initial);
+    return f;
+  }
+
+  function resetFloating(f, initial) {
+    f.x = rnd(0, W); f.y = rnd(0, H);
+    f.word = pick(CFG.floatWords); f.color = pick(CFG.colors);
+    f.size = Math.round(rnd(9, 16) * K);
+    f.alpha = 0; f.maxAlpha = rnd(70, 170);
+    f.vx = rnd(-0.15, 0.15) * K; f.vy = rnd(-0.35, -0.05) * K;
+    f.swaySpeed = rnd(0.01, 0.03); f.swayAmount = rnd(0.1, 0.5) * K;
+    f.phase = rnd(0, Math.PI * 2);
+    f.fadingIn = true;
+    f.maxLife = Math.floor(rnd(240, 700));
+    f.life = initial ? Math.floor(rnd(0, f.maxLife)) : f.maxLife;
+  }
+
+  function updateFloating(f) {
+    f.phase += f.swaySpeed;
+    f.x += f.vx + Math.sin(f.phase) * f.swayAmount;
+    f.y += f.vy;
+    f.life--;
+    if (f.fadingIn) {
+      f.alpha += 2;
+      if (f.alpha >= f.maxAlpha) { f.alpha = f.maxAlpha; f.fadingIn = false; }
+    }
+    if (f.life < 60) f.alpha -= 3;
+    if (f.alpha <= 0 && !f.fadingIn && f.life <= 0) resetFloating(f, false);
+    if (f.y < -20) f.y = H + 10;
+  }
+
+  // ---------------- Setup ----------------
+  function build() {
+    frame = 0; centerAlpha = 0;
+    outline = []; fill = [];
+
+    const toScreen = (hx, hy) => [hx * S + CX, -hy * S + CY + CFG.yOffset * K];
+    const gapO = CFG.outlineGap * K, g = CFG.fillGap * K;
+
+    // garis tepi
+    let last = null, order = 0;
+    for (let i = 0; i < 520; i++) {
+      const [sx, sy] = toScreen(...heart(Math.PI * 2 * i / 520));
+      if (!last || Math.hypot(sx - last[0], sy - last[1]) >= gapO) {
+        const p = heartParticle(sx, sy, order, "outline");
+        p.delay = Math.floor(order * CFG.framesPerStep);
+        outline.push(p);
+        last = [sx, sy];
+        order++;
+      }
+    }
+
+    // isi hati
+    const start = outline[outline.length - 1].delay + CFG.fillDelayOffset;
+    const ys = [];
+    for (let y = CY - 16 * S; y < CY + 16 * S; y += Math.max(6 * K, g / 3)) ys.push(y);
+    order = 0;
+    for (const sy of ys.reverse()) {
+      for (let sx = CX - 16 * S; sx < CX + 16 * S; sx += g) {
+        const px = sx + rnd(-g * 0.3, g * 0.3);
+        const py = sy + rnd(-g * 0.2, g * 0.2);
+        const hx = (px - CX) / S;
+        const hy = -(py - CY - CFG.yOffset * K) / S;
+        if (insideHeart(hx, hy)) {
+          const p = heartParticle(px, py, order, "fill");
+          p.delay = start + Math.floor(order * CFG.framesPerStep);
+          fill.push(p);
+          order++;
+        }
+      }
+    }
+    doneFrame = (fill.length ? fill[fill.length - 1].delay : start) + CFG.centerDelay;
+
+    const n = Math.min(CFG.nFloating, Math.floor(W * H / 900));
+    floaters = Array.from({ length: n }, () => floating(true));
+  }
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    CX = W / 2; CY = H / 2;
+    S = Math.min(17, W * 0.92 / 34, H * 0.86 / 30);   // skala hati
+    K = S / 17;                                        // faktor skala umum
+    build();
+  }
+
+  // ---------------- Update & gambar ----------------
+  function update() {
+    frame++;
+    for (const f of floaters) updateFloating(f);
+    for (const p of outline) stepFade(p);
+    for (const p of fill) stepFade(p);
+    if (frame >= doneFrame) centerAlpha = Math.min(255, centerAlpha + 4);
+  }
+
+  function stepFade(p) {
+    if (frame >= p.delay) {
+      p.alpha = Math.min(255, p.alpha + CFG.fadeSpeedMin + Math.floor(Math.random() * (CFG.fadeSpeedRand + 1)));
+    }
+  }
+
+  const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+  function drawWord(text, x, y, size, color, alpha, family) {
+    ctx.font = `${size}px ${family}`;
+    ctx.fillStyle = rgba(color, Math.max(0, Math.min(1, alpha / 255)));
+    ctx.fillText(text, x, y);
+  }
+
+  function draw() {
+    ctx.fillStyle = CFG.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    // cahaya merah di belakang hati
+    const gr = 350 * Math.max(K, 0.6);
+    const gy = CY + CFG.yOffset * K;
+    const grad = ctx.createRadialGradient(CX, gy, 0, CX, gy, gr);
+    grad.addColorStop(0, "rgba(200,10,20,.16)");
+    grad.addColorStop(1, "rgba(200,10,20,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(CX - gr, gy - gr, gr * 2, gr * 2);
+
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    for (const f of floaters) {
+      if (f.alpha > 1) drawWord(f.word, f.x, f.y, f.size, f.color, f.alpha, "'DejaVu Sans','Segoe UI Symbol',Arial,sans-serif");
+    }
+
+    const t = frame * 0.05;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const list of [fill, outline]) {
+      for (const p of list) {
+        if (p.alpha <= 0) continue;
+        const size = Math.max(7, Math.round((p.kind === "outline" ? 15 : 13) * p.sizeMult * K));
+        const tw = 0.75 + 0.25 * Math.sin(t * 2 + p.flicker);
+        drawWord(p.word, p.x, p.y, size, p.color, p.alpha * tw, "Arial, Helvetica, sans-serif");
+      }
+    }
+
+    if (centerAlpha > 0) {
+      ctx.font = `bold ${Math.round(40 * K)}px ${CFG.centerFont}`;
+      ctx.globalAlpha = centerAlpha / 255;
+      ctx.fillStyle = CFG.centerColor;
+      ctx.fillText(CFG.centerText, CX, CY + CFG.yOffset * K);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // loop dengan langkah tetap 60 fps (sama di layar 60/120/144 Hz)
+  let prev = performance.now(), acc = 0;
+  function loop(now) {
+    acc += Math.min(now - prev, 100);
+    prev = now;
+    while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------------- Musik & kontrol ----------------
+  music.volume = CFG.musicVolume;
+  function startMusic() {
+    music.play().then(() => { hint.style.opacity = 0; }).catch(() => {});
+  }
+  window.addEventListener("pointerdown", () => { if (music.paused) startMusic(); });
+  window.addEventListener("keydown", e => {
+    const k = e.key.toLowerCase();
+    if (k === "r") { build(); music.currentTime = 0; startMusic(); }
+    else if (k === "m") { music.muted = !music.muted; }
+    else if (k === "f") { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.(); }
+  });
+  music.play().then(() => { hint.style.opacity = 0; }).catch(() => {});
+
+  window.addEventListener("resize", resize);
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
